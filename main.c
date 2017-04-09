@@ -9,8 +9,17 @@
 #include "vdp.h"
 #include "sound.h"
 #include "ani1.c"
+#define tune4mat music
+#define tunedigiloo music
+#define letsplay music
+#define ABTUNE music
+#define butterfly music
+
 #include "4mat.h"
 //#include "digiloo.h"
+//#include "letsplay.c"
+//#include "ab.c"
+//#include "butterfly.h"
 
 #define FIRST_TONE_CHAR 2
 #define FIRST_DRUM_CHAR 178
@@ -19,7 +28,7 @@
 
 #define SPRITE_OFF 193
 
-#define MAX_SPRITES 64
+#define MAX_SPRITES 32
 struct SPRITE {
 	// hardware struct - order matters
 	unsigned char y,x;
@@ -27,10 +36,11 @@ struct SPRITE {
 } spritelist[MAX_SPRITES];
 
 struct SPRPATH {
-	int path,step;
-//	int xstep,ystep,zstep;
-//	signed char z;
+	//int path,step;
+	int xstep,ystep,zstep;
+	unsigned int x,y,z;
 } sprpath[MAX_SPRITES];
+int start_zstep;
 
 // pointers into the song data - all include the command nibble. Assumes player uses workspace at >8322
 volatile unsigned int * const pVoice = (volatile unsigned int*)0x833A;
@@ -43,15 +53,15 @@ void stplay();
 
 // ring buffer for delaying audio - multiple of 15 steps
 // sadly, yes, 15 and not 16, which we could mask
-#define DELAYTIME 60
+#define DELAYTIME 30
 unsigned char delayvol[4][DELAYTIME];
 unsigned int delaytone[4][DELAYTIME];
-int delaypos;
+int delaypos, finalcount;
 unsigned int status;
+char nOldVol[4];
+unsigned int nOldVoice[4];
 
 int main() {
-	unsigned char nOldVol[4];
-	unsigned int nOldVoice[4];
 	int nextSprite = 0;
 
 	// init the screen
@@ -61,7 +71,7 @@ int main() {
 		vdpmemset(gPattern, 0, 8);				// char 0 is blank
 		vdpmemset(gImage, 0, 768);				// clear screen to char 0
 		vdpchar(gSprite, 0xd0);					// all sprites disabled
-		VDP_SET_REGISTER(VDP_REG_COL, 0x07);	// cyan screen
+		VDP_SET_REGISTER(VDP_REG_COL, COLOR_MAGENTA);	// background color
 
 		// set up the characters. each of the first 30 color sets
 		// are one target (to make lighting them easy)
@@ -117,6 +127,12 @@ int main() {
 		VDP_REG1_KSCAN_MIRROR = x;				// must have a copy of VDP Reg 1 if you ever use KSCAN
 	}
 
+	// calculate curve (fixed point by scale)
+	start_zstep = 7*(DELAYTIME/15);
+
+	// post-song delay to allow it to finish
+	finalcount = 120;
+
 	for (int idx=0; idx<4; idx++) {
 		nOldVol[idx]=0xff;
 		nOldVoice[idx]=0;
@@ -131,26 +147,18 @@ int main() {
 		spritelist[idx].ch=1;
 	}
 
-//	stinit(tunedigiloo,0);
-	stinit(tune4mat,0);
+	stinit(music,0);
 	*pDone=1;
-//	VDP_INT_HOOK = stplay;
 	delaypos = 0;
-	int frame = 0;
 
-	while (*pDone) {
-//		vdpwaitvint();
+	while ((*pDone)||(finalcount)) {
 		VDP_WAIT_VBLANK_CRU_STATUS(status);		// waits for int and clears it
-
-		// copy the appropriate sprite table up
-		if (frame&1) {
-			vdpmemcpy(gSprite, (unsigned char*)&spritelist[32], 128);
-		} else {
-			vdpmemcpy(gSprite, (unsigned char*)&spritelist[0], 128);
-		}
+		vdpmemcpy(gSprite, (unsigned char*)&spritelist[0], 128);
 
 		// now that the screen is set, NOW we can play
 		stplay();
+
+		if (!(*pDone)) --finalcount;
 
 		// implement frame delay
 		for (int idx=0; idx<4; idx++) {
@@ -168,26 +176,65 @@ int main() {
 
 			// do nothing if muted channel
 			int targ = -1;
-			if ((pVol[idx]&0x0f) < 0x0f) {
+			if (((pVol[idx]&0x0f) < 0x0f)) {
 				if (idx == 3) {
 					targ=((x>>8)&0x07)+FIRST_DRUM_COLOR;
 				} else {
 					targ=tonetarget[x&0x3ff] + FIRST_TONE_COLOR;
 				}
 
-				if ((pVol[idx] < nOldVol[idx]-2)||(targ!=nOldVoice[idx])) {
-					// trigger new ball
+				if ((pVol[idx] < nOldVol[idx]-8)||(targ!=nOldVoice[idx])) {
+					// trigger new ball (if available - we let them finish)
 					unsigned int y = nextSprite++;
 					if (nextSprite >= MAX_SPRITES) nextSprite = 0;
-					if (idx == 3) {
-						sprpath[y].path=((x>>8)&0x07)+FIRST_DRUM_COLOR;
-					} else {
-						sprpath[y].path=tonetarget[x&0x3ff] + FIRST_TONE_COLOR;
-					}
-					sprpath[y].step=0;
-					spritelist[y].y=spritetrace[idx][sprpath[idx].path][1];
-					spritelist[y].x=spritetrace[idx][sprpath[idx].path][0];
-					spritelist[y].col=colorchan[idx]>>4;
+					if (spritelist[y].y == SPRITE_OFF) {
+						// find target and source
+						int tx,ty;
+						int sx,sy;
+						if (idx == 3) {
+							int p = ((x>>8)&0x07)*2;
+							tx=drums[p+1]*8;
+							ty=drums[p]*8;
+							// drums start in the middle
+							sx=124;
+							sy=15*8;
+						} else {
+							int p = tonetarget[x&0x3ff] * 2;
+							tx=tones[p+1]*8;
+							ty=tones[p]*8-4;
+							// tones around at the top
+							sx=128-4;
+							sy=1*8;
+							if (idx != 1) {
+								sy+=4*8;
+								if (idx == 0) {
+									sx=3*8;
+								} else {
+									sx=28*8;
+								}
+							}
+						}
+						// fill in the path data (12.4 fixed point)
+						// work around signed divide issues
+						if (tx >= sx) {
+							sprpath[y].xstep = ((tx-sx)<<4) / DELAYTIME;
+						} else {
+							sprpath[y].xstep = -(((sx-tx)<<4) / DELAYTIME);
+						}
+						if (ty >= sy) {
+							sprpath[y].ystep = ((ty-sy)<<4) / DELAYTIME;
+						} else {
+							sprpath[y].ystep = -(((sy-ty)<<4) / DELAYTIME);
+						}
+						sprpath[y].zstep = -start_zstep;	// (z is integer)
+						sprpath[y].x = (sx<<4);
+						sprpath[y].y = (sy<<4);
+						sprpath[y].z = 0;
+
+						spritelist[y].y=sy;
+						spritelist[y].x=sx;
+						spritelist[y].col=colorchan[idx]>>4;
+					} 
 				}
 			}
 
@@ -245,24 +292,24 @@ int main() {
 		}
 
 		// and animate the sprites
-		++frame;
-		frame&=0x03;
-		for (int idx = frame*16; idx<frame*16+16; idx++) {
+		for (int idx = 0; idx<MAX_SPRITES; idx++) {
 			if (spritelist[idx].y == SPRITE_OFF) continue;
 
-			sprpath[idx].step+=2;
-			if (sprpath[idx].step > 28) {
-				// end it when it hits?
+			sprpath[idx].z += sprpath[idx].zstep;
+			++sprpath[idx].zstep;
+
+			// end when it hits bottom of arc
+			if (sprpath[idx].zstep > start_zstep) {
 				spritelist[idx].y = SPRITE_OFF;
 				continue;
 			}
 
-			if (spritetrace[idx][sprpath[idx].path][sprpath[idx].step+1] == 255) {
-				spritelist[idx].y = SPRITE_OFF;
-				continue;
-			}
-			spritelist[idx].y=spritetrace[idx][sprpath[idx].path][sprpath[idx].step+1];
-			spritelist[idx].x=spritetrace[idx][sprpath[idx].path][sprpath[idx].step];
+			sprpath[idx].x += sprpath[idx].xstep;
+			sprpath[idx].y += sprpath[idx].ystep;
+			// no need to check, since we use the arc to end it
+
+			spritelist[idx].y=(sprpath[idx].y>>4)+(sprpath[idx].z>>(1+(DELAYTIME/15)));
+			spritelist[idx].x=(sprpath[idx].x>>4);
 		}
 	}
 
