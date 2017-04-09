@@ -1,0 +1,10 @@
+ea5.map
+ANI1
+ANI2
+ANI3
+*.bin
+*.elf
+*.o
+*.map
+*.i
+*.s
